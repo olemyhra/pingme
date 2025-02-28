@@ -7,6 +7,7 @@
 #include <errno.h>
 #include <unistd.h>
 #include <sys/time.h>
+#include <string.h>
 
 #define check_ebzero(x, y) if ((x) <= 0) {fprintf(stderr, (y)); exit(EXIT_FAILURE);}
 #define check_bzero(x, y) if ((x) < 0) {fprintf(stderr, (y)); exit(EXIT_FAILURE);}
@@ -15,6 +16,7 @@
 #define RECIEVE_BUFFER_SIZE 1024
 #define RECV_TIMEOUT 5
 #define TTL_TIME 56
+#define MILLISECONDS 1000
 
 struct options {
 	uint8_t 			: 3;
@@ -37,7 +39,7 @@ int main(int argc, char **argv) {
 
 	int end_device = 0;
 	check_bzero(end_device = socket(AF_INET, SOCK_RAW, IPPROTO_ICMP), 
-		"Unable to create socket!\n");
+		"pingme: unable to create socket!\n");
 
 	struct sockaddr_in end_device_address = {0};
 	end_device_address.sin_family = AF_INET;
@@ -53,57 +55,72 @@ int main(int argc, char **argv) {
 	struct timeval recieve_timeout = {0};
 	recieve_timeout.tv_sec = RECV_TIMEOUT;
 	check_bzero(setsockopt(end_device, SOL_SOCKET, SO_RCVTIMEO, (void *) &recieve_timeout,  sizeof(recieve_timeout)),
-		"Unable to set socket recieve timeout value!");
+		"pingme: unable to set socket recieve timeout value!");
 
 	int ttl_time = TTL_TIME;
 	check_bzero(setsockopt(end_device, IPPROTO_IP, IP_TTL, (void *) &ttl_time, sizeof(int)), 
-		"Unable to set IP TTL time!\n");
+		"pingme: unable to set IP TTL time!\n");
 
-	struct icmphdr icmp = {0};
-	icmp.type = ICMP_ECHO;
-	icmp.code = 0;
-	icmp.checksum = 0xf7a5;
-	icmp.un.echo.id = 0;
-	icmp.un.echo.sequence = 2130;
+	struct icmphdr icmp_header = {0};
+	icmp_header.type = ICMP_ECHO;
+	icmp_header.code = 0;
+	icmp_header.checksum = 0xf7a5;
+	icmp_header.un.echo.id = 0;
+	icmp_header.un.echo.sequence = 2130;
 
-	
-	int bytes_sent = 0;
-	void *data = &icmp;
-	bytes_sent = sendto(end_device, data, sizeof(icmp), 
-		0, (struct sockaddr *) &end_device_address, sizeof(end_device_address));
-
-	if(bytes_sent < 0) {
-		perror("Error: ");
-		exit(EXIT_FAILURE);
-	} else {
-		if (user_options.display_raw_send) {
-			printf("TX: %d bytes (", bytes_sent);
-			display_data(data, sizeof(icmp));
-			printf(")\n");
-		} else {
-			printf("TX: %d bytes\n", bytes_sent);
-		}
-	}	
-
-	int bytes_recieved = 0;
 	uint8_t *recieve_buffer = (uint8_t *) calloc(RECIEVE_BUFFER_SIZE, sizeof(char));
-	struct sockaddr_in response_address = {0};
-	socklen_t response_address_size = sizeof(response_address);
+ 	do {
+		int bytes_sent = 0;
+		void *data = &icmp_header;
+		struct timeval time_sent = {0};
+		struct timeval time_recieved = {0};
 	
-	bytes_recieved = recvfrom(end_device, recieve_buffer, (size_t) RECIEVE_BUFFER_SIZE,
-		0, (struct sockaddr *) &response_address, &response_address_size);
-	if (bytes_recieved > 0) {
-		if (user_options.display_raw_recieve) {
-			printf("RX: %d bytes (", bytes_recieved);
-			display_data((void *) recieve_buffer, bytes_recieved);
-			printf(")\n");			
+		gettimeofday(&time_sent, NULL);
+	
+		bytes_sent = sendto(end_device, data, sizeof(icmp_header), 
+			0, (struct sockaddr *) &end_device_address, sizeof(end_device_address));
+
+		if(bytes_sent < 0) {
+			perror("pingme: error: ");
+			exit(EXIT_FAILURE);
 		} else {
-			printf("RX: %d bytes\n", bytes_recieved);
+			if (user_options.display_raw_send) {
+				printf("Tx: %d bytes (", bytes_sent);
+				display_data(data, sizeof(icmp_header));
+				printf(")\n");
+			} else {
+				printf("Sent %d bytes to %s:\n", bytes_sent, 
+					(user_options.no_option_selected ? argv[1] : argv[2]));
+			}
+		}	
+
+		int bytes_recieved = 0;
+		struct sockaddr_in response_address = {0};
+		socklen_t response_address_size = sizeof(response_address);
+		
+		bytes_recieved = recvfrom(end_device, recieve_buffer, (size_t) RECIEVE_BUFFER_SIZE,
+			0, (struct sockaddr *) &response_address, &response_address_size);
+	
+		if (bytes_recieved > 0) {
+			gettimeofday(&time_recieved, NULL);
+			if (user_options.display_raw_recieve) {
+				printf("Rx: %d bytes (", bytes_recieved);
+				display_data((void *) recieve_buffer, bytes_recieved);
+				printf(")\n");			
+			} else {
+				char response_address_string[INET_ADDRSTRLEN] = {0};
+				inet_ntop(AF_INET, &(response_address.sin_addr), response_address_string, INET_ADDRSTRLEN);
+				printf("Reply from %s, data:%d bytes, round trip time:%ld ms\n", response_address_string, 
+					bytes_recieved, (time_recieved.tv_usec - time_sent.tv_usec) / MILLISECONDS);
+			}
+		} else {
+			fprintf(stderr, "Timeout\n");
 		}
-	} else {
-		fprintf(stderr, "Timeout...exiting!\n");
-		exit(EXIT_SUCCESS);
-	}
+
+		memset(recieve_buffer, 0, RECIEVE_BUFFER_SIZE);
+		sleep(1);	
+
+	} while (user_options.ping_until_stop);
 
 	close(end_device);
 	free(recieve_buffer);
